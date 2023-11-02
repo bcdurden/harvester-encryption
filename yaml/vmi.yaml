@@ -1,0 +1,21 @@
+apiVersion: harvesterhci.io/v1beta1
+kind: VirtualMachineImage
+metadata:
+  name: ubuntu-2004
+  annotations:
+    harvesterhci.io/storageClassName: harvester-longhorn
+  labels:
+    harvesterhci.io/imageDisplayName: ubuntu-2004
+  namespace: default
+spec:
+  checksum: ''
+  displayName: ubuntu-2004
+  pvcName: ''
+  pvcNamespace: ''
+  retry: 3
+  sourceType: download
+  storageClassParameters:
+    migratable: 'true'
+    numberOfReplicas: '3'
+    staleReplicaTimeout: '30'
+  url: http://cloud-images.ubuntu.com/releases/focal/release/ubuntu-20.04-server-cloudimg-amd64.img
