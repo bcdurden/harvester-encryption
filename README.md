@@ -789,3 +789,153 @@ Run status group 0 (all jobs):
    WRITE: bw=1155KiB/s (1182kB/s), 1155KiB/s-1155KiB/s (1182kB/s-1182kB/s), io=67.7MiB (70.9MB), run=60001-60001msec
 
 ```
+
+
+### NEW for Longhorn 1.6+ / Harvester 1.3 +
+
+Changes occurred in Longhorn 1.6 that have impacted the functionality above. For encryption, backing images in Longhorn 1.5.x were never passed through encryption or decryption as they were static images that did not change. Block mode volumes were never decrypted as block mode was not supported. So the base image was left intact but the snapshot-based layer changes over time as the VM ran would be. Snapshots and filesystem mode volumes were encrypted at rest.
+
+In Longhorn 1.6.x, block mode volumes are now supported for encryption/decryption but still not for backing images. This puts Harvester into a weird state as it uses both block mode volumes and backing images for root volumes. Since Harvester still does not officially support encrypted root volumes yet, the fix for 1.2.1/2 broke. Longhorn was now suddenly expecting block volumes to have been previously encrypted. Longhorn does not provide a capability of encrypting backing images. So we are in a chicken/egg issue. EaR official support is coming in 1.4 and Longhorn's update to block mode support was part of this.
+
+Fortunately, this can be fixed but the workaround requires a few extra steps including the original though they will not be too difficult to wrap into existing automation workflows. Essentially, encrytion of the root volume image has to happen before it is uploaded to Harvester.
+
+This process breaks down into two parts:
+1) Encrypting the Backing image
+2) Installing cryptsetup onto Harvester
+
+After you have completed these two steps, your resulting image loaded into longhorn will need to have its storage class changed as before to add the decryption keys.
+
+### Encrypting the Backing Image
+Encrypting the backing image requires manual encryption of the backing image. Luckily, on a standard linux workstation, this is easy and can be tied into Packer or other automation steps. There is a simple script available at [scripts/encrypt_base_image.sh](scripts/encrypt_base_image.sh) to help accelerate but I will explain what is happening below.
+
+We need to build an output file that we can write the encrypted data to, so use `truncate` in this case. The size should be whatever your source image size is (I'm using Ubuntu cloudimg here). Note that this is a QCOW image for Harvester's consumption, it is not a single partition so I need to mount this device using qemu-friendly tools, I use `qemu-nbd`.
+
+Since I am writing a QCOW disk image, the physical size of the input image file is not the same as the size of the partitions within. I am guessing at 3Gigs for size since my Ubuntu cloud image is 2.5Gb total uncompressed. I am creating an empty file of 3GB in size. If you are using a different qcow-base image, then you will need to take a look at the total size to choose the proper size for yourself.
+
+You can do this via the `qemu-nbd` tool. Mount the qcow image and then use fdisk to analyze the size:
+```bash
+sudo qemu-nbd --connect=/dev/nbd0 image
+sudo fdisk /dev/nbd0 -l
+sudo qemu-nbd -d /dev/nbd0
+```
+
+Based on that info, I'm using 3Gb for my image. We need the file size to be a little larger to account for the luks metadata
+```bash
+TRUNC_SIZE=3G
+truncate -s $TRUNC_SIZE image-encrypted.img
+```
+
+Next we create a loop device that we'll use for writing to the image file directly. I am fetching the next available loop device from the `losetup` command so I don't have to manually find one:
+```bash
+LOOP_DEVICE=$(sudo losetup -f)
+sudo losetup $LOOP_DEVICE image-encrypted.img   
+```
+
+Next we use cryptsetup to initialize the image with all of our encryption configs. These values are pulled directly from our examples of above when configuring a longhorn encryption secret. The variable names should be obvious but how I fetch these values from the harvester cluster is included in the [script file](scripts/encrypt_base_image.sh).
+
+```bash
+echo -n $CRYPTO_KEY_VALUE | sudo cryptsetup -q luksFormat --type luks2 --cipher $CRYPTO_KEY_CIPHER --hash $CRYPTO_KEY_HASH --key-size $CRYPTO_KEY_SIZE --pbkdf $CRYPTO_PBKDF $LOOP_DEVICE -
+echo -n $CRYPTO_KEY_VALUE | sudo cryptsetup luksOpen $LOOP_DEVICE image-encrypted.img -
+```
+
+Once cryptsetup has been initialized, I can mount the QCOW image as an NBD device and then use `dd` to copy the NBD device to the destination mapped device. This might take a minute or two.
+
+```bash
+sudo qemu-nbd --connect=/dev/nbd0 image
+sudo dd if=image of=/dev/mapper/image-encrypted.img
+sudo losetup -d $LOOP_DEVICE
+```
+
+The resulting image at `image-encrypted.img` can now be uploaded into Harvester as a VirtualMachineImage type.
+
+I clean up my disk mappings:
+```bash
+sudo cryptsetup luksClose encryption
+sudo losetup -d $LOOP_DEVICE
+sudo qemu-nbd -d /dev/nbd0
+```
+
+Now I run this script to create and test it as an example. I am pulling my ubuntu image from a local fileserver for speed:
+
+```console
+$ ./encrypt_base_image.sh http://10.0.0.90:9900/ubuntu-20.04-server-cloudimg-amd64.img longhorn-crypto
+Downloading VM image from http://10.0.0.90:9900/ubuntu-20.04-server-cloudimg-amd64.img
+  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                 Dload  Upload   Total   Spent    Left  Speed
+100  575M  100  575M    0     0  52.0M      0  0:00:11  0:00:11 --:--:-- 48.2M
+Grabbing Longhorn encryption details from secret longhorn-crypto
+Creating output file for writing
+[sudo] password for deathstar: 
+Creating loop device for writing
+Using cryptsetup to prepare luks2
+Writing file as QCOW image
+4612096+0 records in
+4612096+0 records out
+2361393152 bytes (2.4 GB, 2.2 GiB) copied, 17.9856 s, 131 MB/s
+/dev/nbd0 disconnected
+Upload this file to Longhorn as a VM image
+```
+
+Now I verify everything is in-tact
+```console
+$ ./verify_encryption.sh image-encrypted.img longhorn-crypto
+Grabbing Longhorn encryption details from secret longhorn-crypto
+GPT PMBR size mismatch (4612095 != 6258687) will be corrected by write.
+The backup GPT table is not on the end of the device.
+Disk /dev/mapper/encryption: 2.98 GiB, 3204448256 bytes, 6258688 sectors
+Units: sectors of 1 * 512 = 512 bytes
+Sector size (logical/physical): 512 bytes / 512 bytes
+I/O size (minimum/optimal): 512 bytes / 512 bytes
+Disklabel type: gpt
+Disk identifier: 58F4D642-A551-4973-8255-533ACFAF91DE
+
+Device                         Start     End Sectors  Size Type
+/dev/mapper/encryption-part1  227328 4612062 4384735  2.1G Linux filesystem
+/dev/mapper/encryption-part14   2048   10239    8192    4M BIOS boot
+/dev/mapper/encryption-part15  10240  227327  217088  106M EFI System
+
+Partition table entries are not in disk order.
+If successful, fdisk will show the in-tact disk partitions in the image. If you see sizing errors in red at the top, that likely is not a problem
+```
+
+I can now upload this img file to Harvester as an encryted virtual machine image
+
+
+### cryptsetup on Harvester
+This is an involved process because Harvester's OS image is immutable and designed to not be modified. Since Longhorn uses cryptsetup on the host IPC, we have to update every host node by installing cryptsetup. This requires entering a specific boot mode in order to write to the main partition. Doing this process during installation is SIGNIFICANTLY less complicated.
+
+For more detailed notes [click here](https://docs.harvesterhci.io/v1.3/troubleshooting/os#how-can-i-install-packages-why-are-some-paths-read-only)
+
+For each node, write this file:
+```bash
+cat > /oem/91_hack.yaml <<'EOF'
+name: "Rootfs Layout Settings for debugrw"
+stages:
+  rootfs:
+    - if: 'grep -q root=LABEL=COS_STATE /proc/cmdline && grep -q rd.cos.debugrw /proc/cmdline'
+      name: "Layout configuration for debugrw"
+      environment_file: /run/cos/cos-layout.env
+      environment:
+        RW_PATHS: " "
+EOF
+```
+
+Reboot the node and hit 'e' when the grub boot menu appears (yes you will need to be KVM'd or direct access to the console). On the line beginning with `linux` scroll to the end of that line (it wraps) and add `rd.cos.debugrw`. Hit F10 to boot the node.
+
+Now the node's root file system is writeable. You can either enter via console once it is booted or hop in via SSH.
+
+Use the OpenSUSE leap repo that holds cryptsetup and install it. The refresh command requires manual entry of `a` to accept the upstream signing key
+```bash
+zypper addrepo http://download.opensuse.org/distribution/leap/15.5/repo/oss/  main
+zypper refresh
+zypper install -y --no-recommends cryptsetup
+```
+
+Once cryptsetup is installed, let's cleanup:
+```bash
+rm /oem/91_hack.yaml
+zypper clean
+zypper removerepo 1
+```
+
+Once you reboot, your node will be read-only again. Repeat this process for all nodes.
