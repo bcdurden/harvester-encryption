@@ -939,3 +939,22 @@ zypper removerepo 1
 ```
 
 Once you reboot, your node will be read-only again. Repeat this process for all nodes.
+
+At this point, encryption at rest should function as before. Whenever new VM images are needed, their backing image needs to be encrypted first. This will no longer be necessary with Harvester 1.4's native support.
+
+## PXE Boot and cryptsetup
+Installing `cryptsetup` is very easy when using PXE booting for Harvester. Within Harvester's yaml configuration spec per node, there is a field called `after_install_chroot_commands`. The field is documented [here](https://docs.harvesterhci.io/v1.2/install/harvester-configuration#osafter_install_chroot_commands).
+
+Using this field with the above instructions with zypper, the cryptsetup install can be performed without the special grub settings at all. Use this set of commands:
+
+```yaml
+os:
+  after_install_chroot_commands:
+    - "rm -f /etc/resolv.conf && echo 'nameserver 8.8.8.8' | sudo tee /etc/resolv.conf"
+    - zypper addrepo http://download.opensuse.org/distribution/leap/15.5/repo/oss/  main
+    - zypper refresh
+    - zypper install -y --no-recommends cryptsetup
+    - zypper clean
+    - zypper removerepo 1
+    - "rm -f /etc/resolv.conf && ln -s /var/run/netconfig/resolv.conf /etc/resolv.conf"
+```
