@@ -926,7 +926,7 @@ Now the node's root file system is writeable. You can either enter via console o
 
 Use the OpenSUSE leap repo that holds cryptsetup and install it. The refresh command requires manual entry of `a` to accept the upstream signing key
 ```bash
-zypper addrepo http://download.opensuse.org/distribution/leap/15.5/repo/oss/  main
+zypper addrepo --no-gpgcheck http://download.opensuse.org/distribution/leap/15.5/repo/oss main
 zypper refresh
 zypper install -y --no-recommends cryptsetup
 ```
@@ -942,16 +942,25 @@ Once you reboot, your node will be read-only again. Repeat this process for all 
 
 At this point, encryption at rest should function as before. Whenever new VM images are needed, their backing image needs to be encrypted first. This will no longer be necessary with Harvester 1.4's native support.
 
-## PXE Boot and cryptsetup
-Installing `cryptsetup` is very easy when using PXE booting for Harvester. Within Harvester's yaml configuration spec per node, there is a field called `after_install_chroot_commands`. The field is documented [here](https://docs.harvesterhci.io/v1.2/install/harvester-configuration#osafter_install_chroot_commands).
+## Harvester Configuration File to install cryptsetup
+Installing `cryptsetup` is very easy when using the Harvester Configuration file (GUI or PXE). Within Harvester's configuration file, there is a field called `after_install_chroot_commands` and `after_upgrade_chroot_commands`. The field is documented [here](https://docs.harvesterhci.io/v1.2/install/harvester-configuration#osafter_install_chroot_commands) and can be used when installing via the [GUI](https://docs.harvesterhci.io/v1.3/install/index#installation-steps) or [PXE](https://docs.harvesterhci.io/v1.3/install/pxe-boot-install).
 
 Using this field with the above instructions with zypper, the cryptsetup install can be performed without the special grub settings at all. Use this set of commands:
 
 ```yaml
+scheme_version: 1
 os:
   after_install_chroot_commands:
-    - "rm -f /etc/resolv.conf && echo 'nameserver 8.8.8.8' | sudo tee /etc/resolv.conf"
-    - zypper addrepo http://download.opensuse.org/distribution/leap/15.5/repo/oss/  main
+    - "rm -f /etc/resolv.conf && echo 'nameserver 1.1.1.1' | sudo tee /etc/resolv.conf"
+    - zypper addrepo --no-gpgcheck http://download.opensuse.org/distribution/leap/15.5/repo/oss main
+    - zypper refresh
+    - zypper install -y --no-recommends cryptsetup
+    - zypper clean
+    - zypper removerepo 1
+    - "rm -f /etc/resolv.conf && ln -s /var/run/netconfig/resolv.conf /etc/resolv.conf"
+after-upgrade-chroot_commands:
+    - "rm -f /etc/resolv.conf && echo 'nameserver 1.1.1.1' | sudo tee /etc/resolv.conf"
+    - zypper addrepo --no-gpgcheck http://download.opensuse.org/distribution/leap/15.5/repo/oss main
     - zypper refresh
     - zypper install -y --no-recommends cryptsetup
     - zypper clean
