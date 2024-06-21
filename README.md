@@ -842,7 +842,7 @@ Once cryptsetup has been initialized, I can mount the QCOW image as an NBD devic
 
 ```bash
 sudo qemu-nbd --connect=/dev/nbd0 image
-sudo dd if=image of=/dev/mapper/image-encrypted.img
+sudo dd if=/dev/nbd0 of=/dev/mapper/image-encrypted.img
 sudo losetup -d $LOOP_DEVICE
 ```
 
